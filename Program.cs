@@ -105,6 +105,47 @@ class Program
         }
     }
 
+    static void ShowHelp()
+    {
+        var mapLines = string.Join(Environment.NewLine,
+            SceneMap.Select(kv => $"  • Monitor en posición {kv.Key} -> escena \"{kv.Value}\""));
+
+        var text =
+            "CameraSwitch conmuta automáticamente la escena activa de OBS según en qué " +
+            "monitor tengas la ventana en primer plano.\n\n" +
+            "Requiere que OBS esté abierto con el servidor WebSocket activo (puerto 4455, sin contraseña).\n\n" +
+            "Mapeo de escenas actual:\n" + mapLines + "\n" +
+            $"  • Cualquier otro monitor -> escena \"{DefaultScene}\"\n\n" +
+            "Esos nombres deben existir como escenas en tu OBS (en esta versión el mapeo es fijo; " +
+            "la configuración desde la propia app llegará en una próxima versión).\n\n" +
+            $"Registro de actividad: {LogPath}\n" +
+            "(usa \"Abrir log\" en este mismo menú)\n\n" +
+            "El inicio automático con Windows se gestiona mediante una tarea programada " +
+            "llamada \"CameraSwitch\", creada automáticamente al arrancar la app.";
+
+        MessageBox.Show(text, "CameraSwitch - Ayuda", MessageBoxButtons.OK, MessageBoxIcon.Information);
+    }
+
+    static void OpenLog()
+    {
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(LogPath)!);
+            if (!File.Exists(LogPath))
+                File.WriteAllText(LogPath, string.Empty);
+
+            Process.Start(new ProcessStartInfo(LogPath) { UseShellExecute = true });
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(
+                $"No se ha podido abrir el log:\n{LogPath}\n\n{ex.Message}",
+                "CameraSwitch",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Error);
+        }
+    }
+
     static Icon LoadAppIcon()
     {
         using var stream = Assembly.GetExecutingAssembly().GetManifestResourceStream("CameraSwitch.ico");
@@ -221,8 +262,8 @@ class Program
         obs.Connected += (s, e) => { isConnected = true; Log("Conectado a OBS"); };
         obs.Disconnected += (s, e) => { isConnected = false; Log("Desconectado de OBS: " + e.DisconnectReason); };
 
-        TryConnect();
-
+        // El primer intento de conexión lo hace el propio MonitorLoop en su primera
+        // iteración; no duplicar aquí la llamada, o se solapan dos ConnectAsync a la vez.
         var cts = new CancellationTokenSource();
         var monitorThread = new Thread(() => MonitorLoop(cts.Token)) { IsBackground = true };
         monitorThread.Start();
@@ -235,6 +276,9 @@ class Program
         };
 
         var menu = new ContextMenuStrip();
+        menu.Items.Add("Ayuda", null, (s, e) => ShowHelp());
+        menu.Items.Add("Abrir log", null, (s, e) => OpenLog());
+        menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("Salir", null, (s, e) =>
         {
             Log("Aplicación detenida manualmente desde el icono de la bandeja.");

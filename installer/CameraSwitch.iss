@@ -1,5 +1,5 @@
 #define MyAppName "CameraSwitch"
-#define MyAppVersion "1.1.0"
+#define MyAppVersion "1.1.1"
 #define MyAppPublisher "Eduard Sanz"
 #define MyAppExeName "CameraSwitch.exe"
 
@@ -97,4 +97,12 @@ begin
       1: ShellExec('open', 'https://obsproject.com/download', '', '', SW_SHOWNORMAL, ewNoWait, ResultCode);
     end;
   end;
+end;
+
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+var
+  ResultCode: Integer;
+begin
+  if CurUninstallStep = usPostUninstall then
+    Exec('schtasks.exe', '/Delete /TN "CameraSwitch" /F', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
 end;
