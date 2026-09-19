@@ -7,11 +7,16 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <AssemblyName>CameraSwitch</AssemblyName>
-    <ApplicationIcon></ApplicationIcon>
+    <ApplicationIcon>assets\CameraSwitch.ico</ApplicationIcon>
+    <Version>1.1.0</Version>
   </PropertyGroup>
 
   <ItemGroup>
     <PackageReference Include="obs-websocket-dotnet" Version="5.7.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="assets\CameraSwitch.ico" LogicalName="CameraSwitch.ico" />
   </ItemGroup>
 
 </Project>

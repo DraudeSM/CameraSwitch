@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Reflection;
 using System.Runtime.InteropServices;
 using OBSWebsocketDotNet;
 
@@ -104,11 +105,17 @@ class Program
         }
     }
 
+    static Icon LoadAppIcon()
+    {
+        using var stream = Assembly.GetExecutingAssembly().GetManifestResourceStream("CameraSwitch.ico");
+        return stream != null ? new Icon(stream) : SystemIcons.Application;
+    }
+
     static bool IsScheduledTaskInstalled()
     {
         try
         {
-            var psi = new ProcessStartInfo("schtasks.exe", $"/Query /TN \"{TaskName}\"")
+            var psi = new ProcessStartInfo("schtasks.exe", $"/Query /TN \"{TaskName}\" /XML")
             {
                 UseShellExecute = false,
                 RedirectStandardOutput = true,
@@ -116,8 +123,20 @@ class Program
                 CreateNoWindow = true
             };
             using var p = Process.Start(psi)!;
+            var output = p.StandardOutput.ReadToEnd();
             p.WaitForExit();
-            return p.ExitCode == 0;
+            if (p.ExitCode != 0)
+                return false;
+
+            // La tarea existe, pero solo cuenta como válida si apunta al ejecutable actual;
+            // si el .exe se movió (p.ej. tras instalar en una carpeta fija), hay que reregistrarla.
+            var match = System.Text.RegularExpressions.Regex.Match(output, "<Command>(.*?)</Command>");
+            var registeredPath = match.Success ? match.Groups[1].Value.Trim() : "";
+            var currentPath = Application.ExecutablePath;
+            var upToDate = string.Equals(registeredPath, currentPath, StringComparison.OrdinalIgnoreCase);
+            if (!upToDate)
+                Log($"Tarea programada existente apunta a '{registeredPath}', pero el ejecutable actual es '{currentPath}'.");
+            return upToDate;
         }
         catch (Exception ex)
         {
@@ -174,9 +193,9 @@ class Program
             return;
         }
 
-        Log("Tarea programada no encontrada. Solicitando confirmación al usuario.");
+        Log("Tarea programada ausente o desactualizada. Solicitando confirmación al usuario.");
         var result = MessageBox.Show(
-            "No se ha detectado el inicio automático de CameraSwitch con Windows.\n\n¿Quieres configurarlo ahora? Se solicitarán permisos de administrador.",
+            "El inicio automático de CameraSwitch con Windows no está configurado o apunta a una ubicación antigua.\n\n¿Quieres configurarlo ahora? Se solicitarán permisos de administrador.",
             "CameraSwitch",
             MessageBoxButtons.YesNo,
             MessageBoxIcon.Question);
@@ -210,7 +229,7 @@ class Program
 
         using var trayIcon = new NotifyIcon
         {
-            Icon = SystemIcons.Application,
+            Icon = LoadAppIcon(),
             Text = "CameraSwitch",
             Visible = true
         };
