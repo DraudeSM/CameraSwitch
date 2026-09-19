@@ -24,19 +24,26 @@ class Win32
 
 class Program
 {
-    static readonly Dictionary<string, string> SceneMap = new()
+    // Mapeo de respaldo, usado mientras no exista config.json (p.ej. justo tras actualizar
+    // desde una versión anterior a la configuración dinámica, o si el usuario nunca abre el asistente).
+    static readonly Dictionary<string, string> FallbackSceneMap = new()
     {
         { "0_0", "Monitor1" },
         { "-1920_0", "Monitor2" }
     };
-    const string DefaultScene = "Portatil";
+    const string FallbackDefaultScene = "Portatil";
+
     const string LogPath = @"C:\ProgramData\CameraSwitch\camera-switch.log";
+    const string ConfigPath = @"C:\ProgramData\CameraSwitch\config.json";
     const string TaskName = "CameraSwitch";
+
+    static volatile Dictionary<string, string> sceneMap = new(FallbackSceneMap);
+    static volatile string defaultScene = FallbackDefaultScene;
 
     static OBSWebsocket obs = new();
     static bool isConnected = false;
 
-    static void Log(string msg)
+    internal static void Log(string msg)
     {
         try
         {
@@ -89,7 +96,7 @@ class Program
             var key = GetActiveMonitorKey();
             if (key != lastKey)
             {
-                var scene = SceneMap.TryGetValue(key, out var s) ? s : DefaultScene;
+                var scene = sceneMap.TryGetValue(key, out var s) ? s : defaultScene;
                 try
                 {
                     obs.SetCurrentProgramScene(scene);
@@ -108,22 +115,102 @@ class Program
     static void ShowHelp()
     {
         var mapLines = string.Join(Environment.NewLine,
-            SceneMap.Select(kv => $"  • Monitor en posición {kv.Key} -> escena \"{kv.Value}\""));
+            sceneMap.Select(kv => $"  • Monitor en posición {kv.Key} -> escena \"{kv.Value}\""));
 
         var text =
             "CameraSwitch conmuta automáticamente la escena activa de OBS según en qué " +
             "monitor tengas la ventana en primer plano.\n\n" +
             "Requiere que OBS esté abierto con el servidor WebSocket activo (puerto 4455, sin contraseña).\n\n" +
+            "Por privacidad, la cámara virtual empieza apagada: usa \"Cámara virtual\" en este mismo " +
+            "menú para activarla solo cuando vayas a hacer una llamada (p.ej. en Teams) y detenerla al terminar.\n\n" +
             "Mapeo de escenas actual:\n" + mapLines + "\n" +
-            $"  • Cualquier otro monitor -> escena \"{DefaultScene}\"\n\n" +
-            "Esos nombres deben existir como escenas en tu OBS (en esta versión el mapeo es fijo; " +
-            "la configuración desde la propia app llegará en una próxima versión).\n\n" +
+            $"  • Cualquier otro monitor -> escena \"{defaultScene}\"\n\n" +
+            "Usa \"Configurar cámaras...\" en este mismo menú para detectar tus monitores y cámaras " +
+            "y crear o actualizar las escenas correspondientes en OBS.\n\n" +
             $"Registro de actividad: {LogPath}\n" +
             "(usa \"Abrir log\" en este mismo menú)\n\n" +
             "El inicio automático con Windows se gestiona mediante una tarea programada " +
             "llamada \"CameraSwitch\", creada automáticamente al arrancar la app.";
 
         MessageBox.Show(text, "CameraSwitch - Ayuda", MessageBoxButtons.OK, MessageBoxIcon.Information);
+    }
+
+    static void ApplySceneConfig(SceneConfig config)
+    {
+        sceneMap = config.ToSceneMap();
+        defaultScene = config.DefaultSceneName;
+    }
+
+    static void LoadSceneConfigOrFallback()
+    {
+        var config = SceneConfig.Load(ConfigPath);
+        if (config != null && config.Scenes.Count > 0)
+        {
+            ApplySceneConfig(config);
+            Log("Configuración de cámaras cargada desde config.json.");
+        }
+        else
+        {
+            sceneMap = new Dictionary<string, string>(FallbackSceneMap);
+            defaultScene = FallbackDefaultScene;
+        }
+    }
+
+    static void OpenSetupWizard()
+    {
+        if (!isConnected)
+        {
+            MessageBox.Show(
+                "CameraSwitch necesita estar conectado a OBS para configurar las cámaras.\n\nAbre OBS y vuelve a intentarlo.",
+                "CameraSwitch",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Warning);
+            return;
+        }
+
+        var currentConfig = SceneConfig.Load(ConfigPath);
+        Log(currentConfig == null
+            ? "OpenSetupWizard: no se pudo cargar config.json (null)."
+            : $"OpenSetupWizard: config.json cargado con {currentConfig.Scenes.Count} escena(s): " +
+              string.Join(" | ", currentConfig.Scenes.Select(s => $"{s.MonitorKey}->{s.SceneName}")));
+        using var form = new SetupForm(obs, currentConfig);
+        if (form.ShowDialog() == DialogResult.OK && form.ResultConfig != null)
+        {
+            form.ResultConfig.Save(ConfigPath);
+            ApplySceneConfig(form.ResultConfig);
+            Log("Configuración de cámaras guardada desde el asistente.");
+        }
+    }
+
+    static void EnsureCameraConfig()
+    {
+        if (File.Exists(ConfigPath))
+            return;
+
+        // Da un margen breve a la conexión inicial con OBS, ya lanzada por MonitorLoop.
+        var waitUntil = DateTime.Now.AddSeconds(3);
+        while (!isConnected && DateTime.Now < waitUntil)
+            Thread.Sleep(200);
+
+        if (!isConnected)
+        {
+            Log("OBS no está disponible en el primer arranque; se omite el aviso de configuración de cámaras.");
+            return;
+        }
+
+        var result = MessageBox.Show(
+            "No se ha configurado todavía qué cámara usar para cada monitor.\n\n¿Quieres configurarlo ahora?",
+            "CameraSwitch",
+            MessageBoxButtons.YesNo,
+            MessageBoxIcon.Question);
+
+        if (result != DialogResult.Yes)
+        {
+            Log("El usuario ha rechazado configurar las cámaras en el primer arranque.");
+            return;
+        }
+
+        OpenSetupWizard();
     }
 
     static void OpenLog()
@@ -140,6 +227,57 @@ class Program
         {
             MessageBox.Show(
                 $"No se ha podido abrir el log:\n{LogPath}\n\n{ex.Message}",
+                "CameraSwitch",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Error);
+        }
+    }
+
+    static void RefreshVirtualCamMenuItem(ToolStripMenuItem item)
+    {
+        if (!isConnected)
+        {
+            item.Enabled = false;
+            item.Checked = false;
+            item.Text = "Cámara virtual (sin conexión a OBS)";
+            return;
+        }
+
+        try
+        {
+            var status = obs.GetVirtualCamStatus();
+            item.Enabled = true;
+            item.Checked = status.IsActive;
+            item.Text = status.IsActive ? "Cámara virtual activa (clic para detener)" : "Cámara virtual detenida (clic para activar)";
+        }
+        catch (Exception ex)
+        {
+            Log($"Error al consultar el estado de la cámara virtual: {ex.Message}");
+            item.Enabled = false;
+            item.Text = "Cámara virtual (estado desconocido)";
+        }
+    }
+
+    static void ToggleVirtualCam()
+    {
+        try
+        {
+            var status = obs.GetVirtualCamStatus();
+            if (status.IsActive)
+            {
+                obs.StopVirtualCam();
+                Log("Cámara virtual detenida manualmente desde el menú.");
+            }
+            else
+            {
+                obs.StartVirtualCam();
+                Log("Cámara virtual iniciada manualmente desde el menú.");
+            }
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(
+                $"No se ha podido cambiar el estado de la cámara virtual:\n{ex.Message}",
                 "CameraSwitch",
                 MessageBoxButtons.OK,
                 MessageBoxIcon.Error);
@@ -258,6 +396,7 @@ class Program
         Log("Aplicación iniciada.");
 
         EnsureScheduledTask();
+        LoadSceneConfigOrFallback();
 
         obs.Connected += (s, e) => { isConnected = true; Log("Conectado a OBS"); };
         obs.Disconnected += (s, e) => { isConnected = false; Log("Desconectado de OBS: " + e.DisconnectReason); };
@@ -268,6 +407,8 @@ class Program
         var monitorThread = new Thread(() => MonitorLoop(cts.Token)) { IsBackground = true };
         monitorThread.Start();
 
+        EnsureCameraConfig();
+
         using var trayIcon = new NotifyIcon
         {
             Icon = LoadAppIcon(),
@@ -276,6 +417,11 @@ class Program
         };
 
         var menu = new ContextMenuStrip();
+        var virtualCamItem = new ToolStripMenuItem("Cámara virtual");
+        virtualCamItem.Click += (s, e) => ToggleVirtualCam();
+        menu.Items.Add(virtualCamItem);
+        menu.Items.Add(new ToolStripSeparator());
+        menu.Items.Add("Configurar cámaras...", null, (s, e) => OpenSetupWizard());
         menu.Items.Add("Ayuda", null, (s, e) => ShowHelp());
         menu.Items.Add("Abrir log", null, (s, e) => OpenLog());
         menu.Items.Add(new ToolStripSeparator());
@@ -286,6 +432,7 @@ class Program
             trayIcon.Visible = false;
             Application.Exit();
         });
+        menu.Opening += (s, e) => RefreshVirtualCamMenuItem(virtualCamItem);
         trayIcon.ContextMenuStrip = menu;
 
         Application.Run();
