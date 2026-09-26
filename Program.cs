@@ -7,7 +7,12 @@ class Win32
 {
     [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
     [DllImport("user32.dll")] public static extern IntPtr MonitorFromWindow(IntPtr h, int flag);
+    [DllImport("user32.dll")] public static extern IntPtr MonitorFromPoint(POINT pt, int flag);
     [DllImport("user32.dll")] public static extern bool GetMonitorInfo(IntPtr hMonitor, ref MONITORINFO lpmi);
+    [DllImport("user32.dll")] public static extern bool GetCursorPos(out POINT lpPoint);
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct POINT { public int X, Y; }
 
     [StructLayout(LayoutKind.Sequential)]
     public struct RECT { public int Left, Top, Right, Bottom; }
@@ -55,6 +60,19 @@ class Program
 
     static string GetActiveMonitorKey()
     {
+        // Basado en la posición del cursor (el propósito original de la app), no en qué ventana
+        // tiene el foco: durante una videollamada la ventana de Teams puede seguir "activa" aunque
+        // el usuario mueva el ratón a otro monitor sin llegar a hacer clic ahí, y con la detección
+        // por ventana activa eso no disparaba el cambio de escena.
+        if (Win32.GetCursorPos(out var pt))
+        {
+            var hMonCursor = Win32.MonitorFromPoint(pt, 2);
+            var miCursor = new Win32.MONITORINFO { cbSize = Marshal.SizeOf<Win32.MONITORINFO>() };
+            if (Win32.GetMonitorInfo(hMonCursor, ref miCursor))
+                return $"{miCursor.rcMonitor.Left}_{miCursor.rcMonitor.Top}";
+        }
+
+        // Respaldo por si por lo que sea no se puede leer la posición del cursor.
         var hwnd = Win32.GetForegroundWindow();
         var hMon = Win32.MonitorFromWindow(hwnd, 2);
         var mi = new Win32.MONITORINFO { cbSize = Marshal.SizeOf<Win32.MONITORINFO>() };
@@ -81,33 +99,43 @@ class Program
 
         while (!token.IsCancellationRequested)
         {
-            if (!isConnected)
+            try
             {
-                // Reintenta cada 5s sin bloquear el bucle
-                if ((DateTime.Now - lastReconnectAttempt).TotalSeconds >= 5)
+                if (!isConnected)
                 {
-                    lastReconnectAttempt = DateTime.Now;
-                    TryConnect();
+                    // Reintenta cada 5s sin bloquear el bucle
+                    if ((DateTime.Now - lastReconnectAttempt).TotalSeconds >= 5)
+                    {
+                        lastReconnectAttempt = DateTime.Now;
+                        TryConnect();
+                    }
+                    Thread.Sleep(500);
+                    continue;
                 }
-                Thread.Sleep(500);
-                continue;
+
+                var key = GetActiveMonitorKey();
+                if (key != lastKey)
+                {
+                    var scene = sceneMap.TryGetValue(key, out var s) ? s : defaultScene;
+                    try
+                    {
+                        obs.SetCurrentProgramScene(scene);
+                        Log($"Posición: {key} -> Escena: {scene}");
+                    }
+                    catch (Exception ex)
+                    {
+                        Log($"Error al cambiar escena ({scene}): {ex.Message}");
+                    }
+                    lastKey = key;
+                }
+            }
+            catch (Exception ex)
+            {
+                // Nunca dejar morir este hilo en silencio: sin esto, un fallo inesperado aquí
+                // detiene la conmutación para siempre hasta reiniciar la app.
+                Log($"Error inesperado en MonitorLoop (se sigue intentando): {ex}");
             }
 
-            var key = GetActiveMonitorKey();
-            if (key != lastKey)
-            {
-                var scene = sceneMap.TryGetValue(key, out var s) ? s : defaultScene;
-                try
-                {
-                    obs.SetCurrentProgramScene(scene);
-                    Log($"Posición: {key} -> Escena: {scene}");
-                }
-                catch (Exception ex)
-                {
-                    Log($"Error al cambiar escena ({scene}): {ex.Message}");
-                }
-                lastKey = key;
-            }
             Thread.Sleep(500);
         }
     }
@@ -392,6 +420,14 @@ class Program
     static void Main()
     {
         Application.EnableVisualStyles();
+
+        // Red de seguridad para diagnóstico: si algo revienta en un hilo que no controlamos
+        // directamente (p.ej. dentro de la propia librería de OBS websocket), que quede
+        // constancia en el log en vez de que el proceso desaparezca sin dejar rastro.
+        AppDomain.CurrentDomain.UnhandledException += (s, e) =>
+            Log($"Excepción no controlada, la aplicación puede cerrarse: {e.ExceptionObject}");
+        Application.ThreadException += (s, e) =>
+            Log($"Excepción no controlada en el hilo de interfaz: {e.Exception}");
 
         Log("Aplicación iniciada.");
 

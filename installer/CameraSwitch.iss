@@ -1,5 +1,5 @@
 #define MyAppName "CameraSwitch"
-#define MyAppVersion "1.2.0"
+#define MyAppVersion "1.2.1"
 #define MyAppPublisher "Eduard Sanz"
 #define MyAppExeName "CameraSwitch.exe"
 
